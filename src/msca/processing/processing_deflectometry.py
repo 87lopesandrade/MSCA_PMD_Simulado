@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from typing import Tuple, List
+from scipy.fft import dctn, idctn
 
 class PMDProcessing:
     """
@@ -158,4 +159,68 @@ class PMDProcessing:
                 normals[v, u] = n
                 
         return normals
+
+    def spatial_unwrapping(self, wrapped_phase: np.ndarray, modulation: np.ndarray, mod_threshold: float = None) -> np.ndarray:
+        """
+        Realiza o desembrulho espacial 2D da fase utilizando Mínimos Quadrados via Transformada Discreta de Cosseno (DCT).
+        Aplica uma máscara de confiabilidade baseada na modulação para remover o ruído de fundo.
+        
+        Args:
+            wrapped_phase: Mapa de fase embrulhada (2D, -pi a pi).
+            modulation: Mapa de modulação/SNR (2D).
+            mod_threshold: Limiar de modulação. Se None, é calculado usando percentil 95.
+            
+        Returns:
+            Fase contínua (unwrapped) onde os pixels de ruído recebem np.nan.
+        """
+        H, W = wrapped_phase.shape
+        
+        # 1. Gradientes da Fase Embrulhada
+        def wrap_diff(diff):
+            return diff - 2.0 * np.pi * np.round(diff / (2.0 * np.pi))
+            
+        dx = np.zeros((H, W), dtype=np.float32)
+        dy = np.zeros((H, W), dtype=np.float32)
+        
+        dx[:, :-1] = wrap_diff(wrapped_phase[:, 1:] - wrapped_phase[:, :-1])
+        dy[:-1, :] = wrap_diff(wrapped_phase[1:, :] - wrapped_phase[:-1, :])
+        
+        # 2. Laplaciano (Divergente dos Gradientes)
+        rho = np.zeros((H, W), dtype=np.float32)
+        rho[:, 1:] += dx[:, :-1]
+        rho[:, :-1] -= dx[:, :-1]
+        rho[1:, :] += dy[:-1, :]
+        rho[:-1, :] -= dy[:-1, :]
+        
+        # 3. Transformada Discreta de Cosseno 2D
+        dct_rho = dctn(rho, type=2, norm='ortho')
+        
+        # 4. Solução da Equação de Poisson no Domínio da Frequência
+        x_grid, y_grid = np.meshgrid(np.arange(W), np.arange(H))
+        
+        denom = 2.0 * np.cos(np.pi * x_grid / W) + 2.0 * np.cos(np.pi * y_grid / H) - 4.0
+        # Evitar divisão por zero na frequência zero (u=0, v=0)
+        denom[0, 0] = 1.0
+        
+        dct_phi = dct_rho / denom
+        dct_phi[0, 0] = 0.0  # Remove a componente contínua
+        
+        # 5. Transformada Inversa
+        unwrapped_phase = idctn(dct_phi, type=2, norm='ortho')
+        
+        # 6. Mascaramento baseado na Modulação
+        if mod_threshold is None:
+            # Calcula threshold dinâmico ignorando o fundo exato
+            valid_mod = modulation[modulation > 1e-3]
+            if len(valid_mod) > 0:
+                # Usa 10% do percentil 95 para não ser rigoroso demais
+                mod_threshold = np.percentile(valid_mod, 95) * 0.1
+            else:
+                mod_threshold = 1.0
+                
+        # Mascara onde a modulação for menor que o limiar (fundo/ruído)
+        mask = modulation > mod_threshold
+        unwrapped_phase = np.where(mask, unwrapped_phase, np.nan)
+        
+        return unwrapped_phase
 
