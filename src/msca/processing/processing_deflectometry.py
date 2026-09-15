@@ -2,6 +2,59 @@ import cv2
 import numpy as np
 from typing import Tuple, List
 from scipy.fft import dctn, idctn
+from numba import njit, prange
+
+@njit(parallel=True)
+def _numba_phase_guided_complementary(phi_wrap: np.ndarray, k_gray: np.ndarray) -> np.ndarray:
+    """
+    Filtro de monotonicidade otimizado em Numba para Gray Code Complementar.
+    Transições ideais ocorrem em -pi/2 e pi/2.
+    Zonas seguras são ao redor de -pi, 0 e pi.
+    """
+    H, W = phi_wrap.shape
+    k_corrected = np.zeros_like(k_gray)
+    pi = np.pi
+    
+    for i in prange(H):
+        k_confiavel = k_gray[i, 0]
+        
+        # Inicializa k_confiavel com o primeiro pixel seguro
+        for j in range(W):
+            phi = phi_wrap[i, j]
+            is_safe = (phi <= -3*pi/4) or (phi >= -pi/4 and phi <= pi/4) or (phi >= 3*pi/4)
+            if is_safe:
+                k_confiavel = k_gray[i, j]
+                break
+                
+        for j in range(W):
+            phi = phi_wrap[i, j]
+            
+            # Zonas Seguras (longe das transições -pi/2 e pi/2)
+            is_safe = (phi <= -3*pi/4) or (phi >= -pi/4 and phi <= pi/4) or (phi >= 3*pi/4)
+            
+            if is_safe:
+                k_confiavel = k_gray[i, j]
+                k_corr = k_confiavel
+            else:
+                # Zonas de Risco (perto das transições)
+                if phi > -3*pi/4 and phi < -pi/4:
+                    # Transição em -pi/2
+                    if phi < -pi/2.0:
+                        k_corr = k_confiavel
+                    else:
+                        k_corr = k_confiavel + 1
+                elif phi > pi/4 and phi < 3*pi/4:
+                    # Transição em pi/2
+                    if phi < pi/2.0:
+                        k_corr = k_confiavel
+                    else:
+                        k_corr = k_confiavel + 1
+                else:
+                    k_corr = k_confiavel
+                    
+            k_corrected[i, j] = k_corr
+            
+    return k_corrected
 
 class PMDProcessing:
     """
@@ -223,4 +276,96 @@ class PMDProcessing:
         unwrapped_phase = np.where(mask, unwrapped_phase, np.nan)
         
         return unwrapped_phase
+
+    def decode_graycode(self, gray_images: List[np.ndarray], background: np.ndarray = None) -> np.ndarray:
+        """
+        Decodifica a sequência de código Gray para encontrar a ordem da franja (QSI/k).
+        
+        Args:
+            gray_images: Lista de imagens do código Gray (ordenadas do bit mais significativo para o menos).
+            background: Imagem de intensidade de fundo (threshold) para binarização.
+            
+        Returns:
+            Matriz de inteiros representando a ordem da franja (k).
+        """
+        if background is None:
+            # Se não houver threshold, tenta usar a média das imagens Gray
+            img_stack = np.array(gray_images, dtype=np.float32)
+            background = np.mean(img_stack, axis=0)
+            
+        # 1. Binarização usando o threshold
+        binary_images = [(img > background).astype(np.uint8) for img in gray_images]
+        
+        # 2. Conversão de Gray para Binário normal
+        binary_normal = []
+        binary_normal.append(binary_images[0])
+        for i in range(1, len(binary_images)):
+            binary_normal.append(np.logical_xor(binary_normal[i-1], binary_images[i]).astype(np.uint8))
+            
+        # 3. Conversão de Binário para Inteiro (QSI / k)
+        k = np.zeros_like(gray_images[0], dtype=np.int32)
+        num_bits = len(binary_images)
+        for i, b_img in enumerate(binary_normal):
+            # bit 0 é o MSB
+            weight = 1 << (num_bits - 1 - i)
+            k += b_img.astype(np.int32) * weight
+            
+        return k
+
+    def graycode_unwrapping(self, wrapped_phase: np.ndarray, k: np.ndarray, use_phase_guidance: bool = True) -> np.ndarray:
+        """
+        Desembrulha a fase usando a ordem de franja k extraída do código Gray.
+        Assume Padrão Gray Code Complementar (Transição dupla por período de franja).
+        
+        Args:
+            wrapped_phase: Fase embrulhada entre -pi e pi.
+            k: Ordem da franja QSI (transita a cada pi/2).
+            use_phase_guidance: Utiliza o filtro guiado para corrigir o atraso do k causado por desfoque.
+            
+        Returns:
+            Fase absoluta contínua.
+        """
+        if use_phase_guidance:
+            k_corrected = _numba_phase_guided_complementary(wrapped_phase, k)
+            k_float = k_corrected.astype(np.float32)
+        else:
+            k_float = k.astype(np.float32)
+            
+        absolute_phase = np.zeros_like(wrapped_phase)
+        
+        # O código gerado (baseado no Voris) possui duas regiões de Gray Code para cada franja.
+        # Ou seja, o valor 'k' (QSI) incrementa duas vezes por período da senóide.
+        # As quebras ideais do k ocorrem em -pi/2 e +pi/2, evitando a borda ruidosa de +-pi.
+        
+        mask_left1 = wrapped_phase <= -np.pi / 2.0
+        mask_left2 = (wrapped_phase > -np.pi / 2.0) & (wrapped_phase < np.pi / 2.0)
+        mask_left3 = wrapped_phase >= np.pi / 2.0
+        
+        # Desembrulho robusto de fase (Spatial-Temporal shift):
+        absolute_phase[mask_left1] = wrapped_phase[mask_left1] + 2.0 * np.pi * np.floor((k_float[mask_left1] + 1.0) / 2.0)
+        absolute_phase[mask_left2] = wrapped_phase[mask_left2] + 2.0 * np.pi * np.floor(k_float[mask_left2] / 2.0)
+        absolute_phase[mask_left3] = wrapped_phase[mask_left3] + 2.0 * np.pi * (np.floor((k_float[mask_left3] + 1.0) / 2.0) - 1.0)
+        
+        return absolute_phase
+
+    def graycode_unwrapping_classic(self, wrapped_phase: np.ndarray, k: np.ndarray, use_phase_guidance: bool = True) -> np.ndarray:
+        """
+        Desembrulha a fase para o método Gray Code Clássico (relação 1:1, transição em +-pi).
+        
+        Args:
+            wrapped_phase: Fase embrulhada entre -pi e pi.
+            k: Matriz contendo a ordem das franjas (QSI).
+            use_phase_guidance: Liga/Desliga o filtro de correção guiado pela fase (Phase-Guided Correction).
+                                Otimizado via Numba para alta performance em imagens de alta resolução.
+                                
+        Returns:
+            Matriz de Fase Desembrulhada contínua.
+        """
+        if use_phase_guidance:
+            # Chama a função otimizada em Numba
+            return _numba_phase_guided_unwrapping(wrapped_phase, k)
+        else:
+            # Equação clássica matemática direta (susceptível a spikes nas bordas devido a desfoque)
+            return wrapped_phase + (k.astype(np.float32) * 2.0 * np.pi)
+
 

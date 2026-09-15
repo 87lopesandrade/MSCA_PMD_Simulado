@@ -86,10 +86,10 @@ def evaluate_quality(wrapped_phase, modulation, axis_name, unwrapped_phase=None)
     plt.close()
 
 def main():
-    print("Iniciando extração de Fase para Deflectometria (Single Frequency)...")
+    print("Iniciando extração de Fase com Desembrulho Temporal (Gray Code)...")
     
-    dir_x = os.path.expanduser("~/Desktop/sim_deflectometria/vertical")
-    dir_y = os.path.expanduser("~/Desktop/sim_deflectometria/horizontal")
+    dir_gray = os.path.expanduser("~/Desktop/sim_deflectometria/PMD/Gray_Code")
+    dir_phase = os.path.expanduser("~/Desktop/sim_deflectometria/PMD/Phase")
     
     os.makedirs("out", exist_ok=True)
     
@@ -97,47 +97,53 @@ def main():
     dummy_dist = np.zeros(5)
     pmd = PMDProcessing(camera_matrix=dummy_cam_matrix, dist_coeffs=dummy_dist)
 
-    # ----- EIXO X -----
-    print(f"Processando Eixo X a partir de: {dir_x} ...")
-    imgs_x = load_images_from_directory(dir_x)
+    print(f"Processando Fase a partir de: {dir_phase} ...")
+    imgs_phase = load_images_from_directory(dir_phase, prefix="cam0_phase_step")
     
-    if len(imgs_x) > 0:
-        wrapped_x, mod_x, _ = pmd.decode_nstep_phase(imgs_x)
-        np.save("out/wrapped_phase_x.npy", wrapped_x)
-        cv2.imwrite("out/wrapped_phase_x.png", cv2.normalize(wrapped_x, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
-        print("-> Fase do Eixo X salva em 'out/wrapped_phase_x.npy'")
-        
-        # Desembrulho Espacial (Spatial Unwrapping)
-        print("-> Realizando desembrulho espacial 2D (DCT)...")
-        unwrapped_x = pmd.spatial_unwrapping(wrapped_x, mod_x)
-        np.save("out/unwrapped_phase_x.npy", unwrapped_x)
-        print("-> Fase Absoluta Desembrulhada salva em 'out/unwrapped_phase_x.npy'")
-        
-        evaluate_quality(wrapped_x, mod_x, 'X', unwrapped_x)
-        print("-> Análise de qualidade do Eixo X salva em 'out/quality_analysis_X.png'")
-    else:
-        print(f"-> Imagens do Eixo X não encontradas ou diretório incorreto.")
-
-    # ----- EIXO Y -----
-    print(f"\nProcessando Eixo Y a partir de: {dir_y} ...")
-    imgs_y = load_images_from_directory(dir_y)
+    print(f"Processando Gray Code a partir de: {dir_gray} ...")
+    imgs_gray = load_images_from_directory(dir_gray, prefix="cam0_gray_bit")
     
-    if len(imgs_y) > 0:
-        wrapped_y, mod_y, _ = pmd.decode_nstep_phase(imgs_y)
-        np.save("out/wrapped_phase_y.npy", wrapped_y)
-        cv2.imwrite("out/wrapped_phase_y.png", cv2.normalize(wrapped_y, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
-        print("-> Fase do Eixo Y salva em 'out/wrapped_phase_y.npy'")
+    if len(imgs_phase) > 0 and len(imgs_gray) > 0:
+        wrapped, mod, bg_phase = pmd.decode_nstep_phase(imgs_phase)
+        np.save("out/wrapped_phase.npy", wrapped)
+        cv2.imwrite("out/wrapped_phase.png", cv2.normalize(wrapped, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
+        print("-> Fase salva em 'out/wrapped_phase.npy'")
         
-        # Desembrulho Espacial (Spatial Unwrapping)
-        print("-> Realizando desembrulho espacial 2D (DCT)...")
-        unwrapped_y = pmd.spatial_unwrapping(wrapped_y, mod_y)
-        np.save("out/unwrapped_phase_y.npy", unwrapped_y)
-        print("-> Fase Absoluta Desembrulhada salva em 'out/unwrapped_phase_y.npy'")
+        # Carregar imagem branca (se existir) para definir o limiar de binarização do Gray Code
+        white_path = os.path.join(dir_gray, "cam0_gray_white.png")
+        if os.path.exists(white_path):
+            img_white = cv2.imread(white_path, cv2.IMREAD_GRAYSCALE)
+            threshold_bg = img_white.astype(np.float32) * 0.5
+            print("-> Usando 'cam0_gray_white.png' para o cálculo do limiar (threshold = 0.5 * white).")
+        else:
+            threshold_bg = bg_phase
+            print("-> Imagem branca não encontrada, usando a média das franjas senoidais como limiar.")
         
-        evaluate_quality(wrapped_y, mod_y, 'Y', unwrapped_y)
-        print("-> Análise de qualidade do Eixo Y salva em 'out/quality_analysis_Y.png'")
+        # Desembrulho Temporal (Gray Code)
+        print("-> Decodificando sequencia Gray Code...")
+        k = pmd.decode_graycode(imgs_gray, background=threshold_bg)
+        np.save("out/fringe_order_k.npy", k)
+        cv2.imwrite("out/fringe_order_k.png", cv2.normalize(k, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
+        
+        print("-> Realizando desembrulho temporal...")
+        unwrapped = pmd.graycode_unwrapping(wrapped, k, use_phase_guidance=True)
+        
+        # Aplicar mascara de qualidade e ruído (SNR baixo)
+        valid_mod = mod[mod > 1e-3]
+        if len(valid_mod) > 0:
+            mod_threshold = np.percentile(valid_mod, 95) * 0.1
+        else:
+            mod_threshold = 1.0
+        mask = mod > mod_threshold
+        unwrapped = np.where(mask, unwrapped, np.nan)
+        
+        np.save("out/unwrapped_phase.npy", unwrapped)
+        print("-> Fase Absoluta Desembrulhada salva em 'out/unwrapped_phase.npy'")
+        
+        evaluate_quality(wrapped, mod, 'X', unwrapped)
+        print("-> Análise de qualidade salva em 'out/quality_analysis_X.png'")
     else:
-        print(f"-> Imagens do Eixo Y não encontradas ou diretório incorreto.")
+        print(f"-> Imagens não encontradas. Verifique os diretórios e prefixos.")
         
     print("\nProcessamento concluído.")
 
