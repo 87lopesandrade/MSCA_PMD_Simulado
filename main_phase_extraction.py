@@ -126,7 +126,7 @@ def main():
         cv2.imwrite("out/fringe_order_k.png", cv2.normalize(k, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
         
         print("-> Realizando desembrulho temporal...")
-        unwrapped = pmd.graycode_unwrapping(wrapped, k, use_phase_guidance=True)
+        unwrapped = pmd.graycode_unwrapping(wrapped, k)
         
         # Aplicar mascara de qualidade e ruído (SNR baixo)
         valid_mod = mod[mod > 1e-3]

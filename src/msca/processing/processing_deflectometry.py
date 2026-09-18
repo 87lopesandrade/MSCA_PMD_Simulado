@@ -4,58 +4,6 @@ from typing import Tuple, List
 from scipy.fft import dctn, idctn
 from numba import njit, prange
 
-@njit(parallel=True)
-def _numba_phase_guided_complementary(phi_wrap: np.ndarray, k_gray: np.ndarray) -> np.ndarray:
-    """
-    Filtro de monotonicidade otimizado em Numba para Gray Code Complementar.
-    Transições ideais ocorrem em -pi/2 e pi/2.
-    Zonas seguras são ao redor de -pi, 0 e pi.
-    """
-    H, W = phi_wrap.shape
-    k_corrected = np.zeros_like(k_gray)
-    pi = np.pi
-    
-    for i in prange(H):
-        k_confiavel = k_gray[i, 0]
-        
-        # Inicializa k_confiavel com o primeiro pixel seguro
-        for j in range(W):
-            phi = phi_wrap[i, j]
-            is_safe = (phi <= -3*pi/4) or (phi >= -pi/4 and phi <= pi/4) or (phi >= 3*pi/4)
-            if is_safe:
-                k_confiavel = k_gray[i, j]
-                break
-                
-        for j in range(W):
-            phi = phi_wrap[i, j]
-            
-            # Zonas Seguras (longe das transições -pi/2 e pi/2)
-            is_safe = (phi <= -3*pi/4) or (phi >= -pi/4 and phi <= pi/4) or (phi >= 3*pi/4)
-            
-            if is_safe:
-                k_confiavel = k_gray[i, j]
-                k_corr = k_confiavel
-            else:
-                # Zonas de Risco (perto das transições)
-                if phi > -3*pi/4 and phi < -pi/4:
-                    # Transição em -pi/2
-                    if phi < -pi/2.0:
-                        k_corr = k_confiavel
-                    else:
-                        k_corr = k_confiavel + 1
-                elif phi > pi/4 and phi < 3*pi/4:
-                    # Transição em pi/2
-                    if phi < pi/2.0:
-                        k_corr = k_confiavel
-                    else:
-                        k_corr = k_confiavel + 1
-                else:
-                    k_corr = k_confiavel
-                    
-            k_corrected[i, j] = k_corr
-            
-    return k_corrected
-
 class PMDProcessing:
     """
     Módulo para processamento das imagens de Deflectometria PMD.
@@ -312,7 +260,7 @@ class PMDProcessing:
             
         return k
 
-    def graycode_unwrapping(self, wrapped_phase: np.ndarray, k: np.ndarray, use_phase_guidance: bool = True) -> np.ndarray:
+    def graycode_unwrapping(self, wrapped_phase: np.ndarray, k: np.ndarray) -> np.ndarray:
         """
         Desembrulha a fase usando a ordem de franja k extraída do código Gray.
         Assume Padrão Gray Code Complementar (Transição dupla por período de franja).
@@ -320,17 +268,11 @@ class PMDProcessing:
         Args:
             wrapped_phase: Fase embrulhada entre -pi e pi.
             k: Ordem da franja QSI (transita a cada pi/2).
-            use_phase_guidance: Utiliza o filtro guiado para corrigir o atraso do k causado por desfoque.
             
         Returns:
             Fase absoluta contínua.
         """
-        if use_phase_guidance:
-            k_corrected = _numba_phase_guided_complementary(wrapped_phase, k)
-            k_float = k_corrected.astype(np.float32)
-        else:
-            k_float = k.astype(np.float32)
-            
+        k_float = k.astype(np.float32)
         absolute_phase = np.zeros_like(wrapped_phase)
         
         # O código gerado (baseado no Voris) possui duas regiões de Gray Code para cada franja.
