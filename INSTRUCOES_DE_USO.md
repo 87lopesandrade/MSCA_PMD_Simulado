@@ -1,50 +1,64 @@
-# Guia de Utilização - MSCA PMD Simulado
+# Guia de Utilização - MSCA PMD Simulado (Phase Shifting + Gray Code)
 
-Este repositório contém uma versão simplificada do módulo de Deflectometria por Medição de Fase (PMD) da arquitetura MSCA, voltada especificamente para **simulação**. O objetivo principal é receber imagens renderizadas de padrões de franjas (ex: via Blender) e processá-las para extrair a **fase** nos eixos X e Y.
+Este repositório contém o módulo de Deflectometria por Medição de Fase (PMD) focado no processamento de imagens simuladas (ex: via Blender). O projeto implementa as técnicas de desembrulho espacial de fase combinando **Phase Shifting** e **Gray Code**, adotando a matemática exata do projeto VORIS.
 
-Diferente do projeto completo, este repositório **não exige calibração estéreo real ou acesso ao hardware da Jetson Nano**. Ele foi projetado para rodar os algoritmos de _Phase Shifting_ puramente no ambiente virtual.
+Diferente do projeto completo, este repositório é simplificado, rodando apenas na CPU sem exigir hardware ou câmeras externas.
 
 ---
 
 ## 1. Configuração do Ambiente
 
-Instale as dependências necessárias. Este projeto foi desenhado para rodar utilizando apenas a CPU, sendo totalmente compatível com Windows, Linux e Mac (incluindo Apple Silicon):
+O projeto é mantido através de um ambiente virtual em Python. Certifique-se de que os pacotes necessários estejam instalados (você pode utilizar o arquivo de dependências se precisar reinstalar):
 
 ```bash
 pip install -r requirements.txt
 ```
 
+As principais bibliotecas são `numpy`, `opencv-python` e `matplotlib`.
+
 ---
 
-## 2. Preparação das Imagens de Simulação
+## 2. Preparação das Imagens
 
-O script principal espera imagens simuladas de padrões de franjas defasadas (N-step) utilizando **frequência única** (Single Frequency). 
+O script `main_phase_extraction.py` espera que as imagens adquiridas/simuladas existam nos seguintes diretórios:
 
-O script já está configurado para ler as imagens (formato `.png`) diretamente das suas pastas no Desktop:
+- **Câmera Esquerda:** `~/Desktop/sim_deflectometria/PMD_Voris/out/left/`
+- **Câmera Direita:** `~/Desktop/sim_deflectometria/PMD_Voris/out/right/`
 
-- **Eixo X (Franjas Verticais)**: `~/Desktop/sim_deflectometria/vertical/`
-- **Eixo Y (Franjas Horizontais)**: `~/Desktop/sim_deflectometria/horizontal/`
+### Estrutura de Nomenclatura das Imagens
+Para a Câmera Esquerda (prefixo `L`) e Direita (prefixo `R`), deve-se ter as imagens nomeadas numericamente com formato PNG, totalizando 16 imagens por câmera:
 
-*Certifique-se de que cada pasta contenha o número de imagens correspondente à quantidade de deslocamentos de fase (ex: 4, 8 ou 16 passos) e que não existam outras imagens `.png` perdidas nestas pastas.*
+- **Imagens 0 a 7 (Gray Code)**:
+  - `L000.png` / `R000.png`: Imagem branca para normalização e binarização.
+  - `L001.png` / `R001.png`: Imagem totalmente preta (geralmente ignorada na binarização direta, mas presente na sequência).
+  - `L002.png` a `L007.png` (ou R): Os 6 bits da sequência de Gray Code, projetados do menos significativo ao mais significativo.
+
+- **Imagens 8 a 15 (Phase Shifting)**:
+  - `L008.png` a `L015.png` (ou R): Padrão senoidal de fase deslocada (N=8 passos).
 
 ---
 
 ## 3. Passo a Passo de Execução
 
-### Passo 1: Execução
-No terminal, execute o script principal de extração de fase:
+No terminal, estando na raiz deste projeto, execute o script de extração:
 
 ```bash
 python main_phase_extraction.py
 ```
 
-### Passo 2: Verificação de Resultados
-Ao finalizar a execução, o script criará uma pasta `out/` e salvará os seguintes arquivos:
+### 4. Verificação de Resultados
 
-- `wrapped_phase_x.npy` e `wrapped_phase_y.npy`: Matrizes brutas com os valores da fase matemática "embrulhada" (variando de -π a π). 
-- `wrapped_phase_x.png` e `wrapped_phase_y.png`: Imagens renderizadas da fase normalizadas (0-255) para que você consiga visualizá-las graficamente.
+Ao finalizar o processamento, os resultados serão salvos no diretório:
+`~/Desktop/sim_deflectometria/PMD_Voris/out/results/`
 
-**Nota importante sobre Fase Absoluta:**
-Como você está simulando com apenas uma frequência de franjas (sem usar heterodinação), o algoritmo extrai a fase "embrulhada" (wrapped phase). 
-- Se a sua frequência de renderização for igual a **1** (ou seja, exatamente um período senoidal que preenche a tela inteira), essa fase resultante **já equivale à fase absoluta** do sistema e pode ser usada em cálculos de ray tracing.
-- Se a sua frequência for maior que 1, você precisará aplicar um algoritmo de desembrulho espacial (spatial unwrapping) posteriormente, caso decida prosseguir com o pipeline 3D completo.
+Lá você encontrará os arquivos:
+
+1. **`abs_phi_left.npy` e `abs_phi_right.npy`**: 
+   Matrizes brutas (em formato NumPy) contendo os valores da fase matemática "desembrulhada" e mapeada (Fase Absoluta). Os ruídos de fundo e regiões onde a modulação da franja não chegou foram filtrados (marcados como `NaN`). Essas matrizes são adequadas para continuar o pipeline de reconstrução 3D ou calibração de malha.
+
+2. **`analysis_left.png` e `analysis_right.png`**:
+   Imagens de verificação (plots) que incluem:
+   - Um perfil 1D (perfil transversal no centro da imagem) mostrando o mapa contínuo da fase absoluta versus o Gray Code.
+   - Um mapa em 2D da fase envolta (Wrapped Phi).
+   - Um mapa da fase absoluta espacial, mostrando que os pulos da onda senoidal de 2π foram totalmente resolvidos de maneira suave e correta, baseando-se no Gray Code (Tiago Loureiro's spatial unwrapping).
+   - Mapas auxiliares de Modulação e QSI Remapeado.

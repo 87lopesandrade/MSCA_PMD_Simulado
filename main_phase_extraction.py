@@ -1,151 +1,172 @@
 import os
 import cv2
 import numpy as np
-import glob
 import matplotlib.pyplot as plt
-from src.msca.processing.processing_deflectometry import PMDProcessing
 
-def load_images_from_directory(directory, prefix="cam0"):
+def get_gc_order_v(width, px_f, n_bits):
     """
-    Lê os arquivos .png de uma câmera específica de um diretório.
-    Retorna uma lista de arrays numpy em escala de cinza.
+    Gera a ordem real do Gray Code reproduzindo a mesma técnica do VORIS.
+    No VORIS, isso é feito desenhando a imagem de Gray Code ideal e extraindo 
+    seus valores únicos.
     """
-    files = sorted(glob.glob(os.path.join(directory, f'{prefix}*.png')))
-    if len(files) == 0:
-        print(f"Aviso: Nenhuma imagem encontrada em {directory} com o prefixo {prefix}")
-        return []
+    width_list = [element for element in np.arange(2 ** n_bits, dtype=np.uint8) for _ in range(int(px_f / 2))]
+    graycode_list = [n ^ (n >> 1) for n in width_list]
     
-    imgs = [cv2.imread(f, cv2.IMREAD_GRAYSCALE) for f in files]
-    return imgs
+    # Get unique values while preserving order
+    _, indices = np.unique(graycode_list, return_index=True)
+    sorted_indices = np.argsort(indices)
+    sorted_qsi_val = np.array(graycode_list)[indices][sorted_indices]
+    return sorted_qsi_val
 
-def evaluate_quality(wrapped_phase, modulation, axis_name, unwrapped_phase=None):
+def remap_qsi_image(qsi_image, real_qsi_order):
     """
-    Gera e salva mapas e gráficos de avaliação de qualidade do resultado.
+    Remapeia os valores QSI lidos (baseados no raw gray code binário) para
+    índices ordinais (0, 1, 2, ...). Equivale à conversão Gray -> Binary.
     """
-    # Salvar mapa de modulação (SNR) como imagem visual
-    mod_norm = cv2.normalize(modulation, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    cv2.imwrite(f"out/modulation_map_{axis_name}.png", mod_norm)
+    max_order_val = int(np.max(real_qsi_order))
+    max_qsi_val = int(np.max(qsi_image))
+    max_val = max(max_order_val, max_qsi_val)
     
-    # Se houver fase desembrulhada, gerar uma visualização em PNG também
-    if unwrapped_phase is not None:
-        p_min, p_max = np.nanmin(unwrapped_phase), np.nanmax(unwrapped_phase)
-        if p_max > p_min:
-            unwrapped_norm = ((unwrapped_phase - p_min) / (p_max - p_min) * 255)
-            # Para onde for nan (fundo/ruído mascarado), coloca 0 (preto)
-            unwrapped_norm = np.where(np.isnan(unwrapped_phase), 0, unwrapped_norm).astype(np.uint8)
-            cv2.imwrite(f"out/unwrapped_phase_{axis_name}.png", unwrapped_norm)
-            
-    plt.figure(figsize=(15, 5))
+    lut = np.zeros(max_val + 1, dtype=np.int64)
+    lut[real_qsi_order] = np.arange(len(real_qsi_order), dtype=np.int64)
     
-    # 1. Histograma da Modulação
-    plt.subplot(1, 3, 1)
-    mod_values = modulation.ravel()
-    plt.hist(mod_values[mod_values > 1e-3], bins=100, color='blue', alpha=0.7)
-    plt.title(f"Modulação (SNR) - Eixo {axis_name}")
-    plt.xlabel("Valor de Modulação")
-    plt.ylabel("Frequência")
-    plt.grid(True)
+    valid_mask = (qsi_image >= 0) & (qsi_image <= max_val)
+    safe_qsi = np.where(valid_mask, qsi_image, 0)
+    remapped_qsi_image = np.where(valid_mask, lut[safe_qsi], 0)
     
-    # 2. Perfil 1D da Fase Embrulhada
-    plt.subplot(1, 3, 2)
-    H, W = wrapped_phase.shape
-    if axis_name == 'X':
-        profile_w = wrapped_phase[H // 2, :]
-        plt.plot(profile_w, color='red', linewidth=1.5)
-        plt.title(f"Fase Wrapped (Linha {H//2})")
-        plt.xlabel("Pixels em X")
-    else:
-        profile_w = wrapped_phase[:, W // 2]
-        plt.plot(profile_w, color='green', linewidth=1.5)
-        plt.title(f"Fase Wrapped (Coluna {W//2})")
-        plt.xlabel("Pixels em Y")
-    plt.ylabel("Fase (radianos)")
-    plt.grid(True)
+    return remapped_qsi_image
+
+def process_camera(cam_dir, side):
+    print(f"--- Processando Câmera {side} ---")
+    # Read L000 to L015
+    imgs = []
+    prefix = 'L' if side == 'left' else 'R'
+    for i in range(16):
+        path = os.path.join(cam_dir, f"{prefix}{i:03d}.png")
+        if not os.path.exists(path):
+            print(f"Erro: não achou {path}")
+            return None
+        imgs.append(cv2.imread(path, cv2.IMREAD_GRAYSCALE).astype(np.float32))
+        
+    gc_imgs = np.stack(imgs[:8], axis=-1)   # 8 canais (L000 a L007)
+    ph_imgs = np.stack(imgs[8:], axis=-1)   # 8 canais (L008 a L015)
     
-    # 3. Perfil 1D da Fase Desembrulhada
-    plt.subplot(1, 3, 3)
-    if unwrapped_phase is not None:
-        if axis_name == 'X':
-            profile_u = unwrapped_phase[H // 2, :]
-            plt.plot(profile_u, color='purple', linewidth=1.5)
-            plt.title(f"Fase Unwrapped (Linha {H//2})")
-            plt.xlabel("Pixels em X")
-        else:
-            profile_u = unwrapped_phase[:, W // 2]
-            plt.plot(profile_u, color='orange', linewidth=1.5)
-            plt.title(f"Fase Unwrapped (Coluna {W//2})")
-            plt.xlabel("Pixels em Y")
-        plt.ylabel("Fase absoluta (radianos)")
-    else:
-        plt.text(0.5, 0.5, 'Desembrulho não realizado', ha='center', va='center')
-    plt.grid(True)
+    # 1. Calcular Phi e Modulação
+    num_channels = ph_imgs.shape[-1]
+    indices = np.arange(1, num_channels + 1, dtype=np.float32)
+    angle = 2.0 * np.pi * indices / float(num_channels)
     
-    # Ajustar espaçamento e salvar imagem
-    plt.tight_layout()
-    plt.savefig(f"out/quality_analysis_{axis_name}.png", dpi=150)
-    plt.close()
+    sin_values = np.sin(angle)
+    cos_values = np.cos(angle)
+    
+    sin_contributions = np.sum(ph_imgs * sin_values, axis=2)
+    cos_contributions = np.sum(ph_imgs * cos_values, axis=2)
+    
+    phi_image = np.arctan2(-sin_contributions, cos_contributions)
+    modulation_map = np.sqrt(sin_contributions**2 + cos_contributions**2) / num_channels
+    
+    # 2. Calcular QSI bruto (Raw Binary from Gray Code)
+    white_value = gc_imgs[:, :, 0]
+    white_value = np.clip(white_value, 1e-6, None)
+    
+    bit_values = gc_imgs[:, :, 2:] / white_value[..., np.newaxis]
+    bit_values = (bit_values > 0.5).astype(np.int64)
+    
+    num_bits = bit_values.shape[-1] # Deve ser 6 (L002 a L007)
+    powers = 2 ** np.arange(num_bits - 1, -1, -1, dtype=np.int64)
+    qsi_image = np.sum(bit_values * powers, axis=-1)
+    
+    # 3. Remapear QSI para índice real
+    real_qsi_order = get_gc_order_v(width=2448, px_f=64, n_bits=6)
+    remaped_qsi_image = remap_qsi_image(qsi_image, real_qsi_order)
+    
+    # 4. Desembrulho de Fase (Tiago Loureiro, idêntico ao VORIS)
+    remap_float = remaped_qsi_image.astype(np.float32)
+    abs_phi_image = np.zeros_like(phi_image)
+    
+    m1 = phi_image <= -np.pi / 2.0
+    m2 = (phi_image > -np.pi / 2.0) & (phi_image < np.pi / 2.0)
+    m3 = phi_image >= np.pi / 2.0
+    
+    abs_phi_image[m1] = phi_image[m1] + 2.0 * np.pi * np.floor((remap_float[m1] + 1.0) / 2.0) + np.pi
+    abs_phi_image[m2] = phi_image[m2] + 2.0 * np.pi * np.floor(remap_float[m2] / 2.0) + np.pi
+    abs_phi_image[m3] = phi_image[m3] + 2.0 * np.pi * (np.floor((remap_float[m3] + 1.0) / 2.0) - 1.0) + np.pi
+    
+    return abs_phi_image, phi_image, modulation_map, remaped_qsi_image
 
 def main():
-    print("Iniciando extração de Fase com Desembrulho Temporal (Gray Code)...")
+    data_dir = os.path.expanduser("~/Desktop/sim_deflectometria/PMD_Voris/out")
+    out_dir = os.path.join(data_dir, "results")
+    os.makedirs(out_dir, exist_ok=True)
     
-    dir_gray = os.path.expanduser("~/Desktop/sim_deflectometria/PMD/Gray_Code")
-    dir_phase = os.path.expanduser("~/Desktop/sim_deflectometria/PMD/Phase")
-    
-    os.makedirs("out", exist_ok=True)
-    
-    dummy_cam_matrix = np.eye(3)
-    dummy_dist = np.zeros(5)
-    pmd = PMDProcessing(camera_matrix=dummy_cam_matrix, dist_coeffs=dummy_dist)
+    for side in ['left', 'right']:
+        cam_dir = os.path.join(data_dir, side)
+        if not os.path.exists(cam_dir):
+            continue
+            
+        res = process_camera(cam_dir, side)
+        if res is None:
+            continue
+            
+        abs_phi, phi, mod, qsi = res
+        
+        # Mascara do espelho
+        # Em VORIS, costumam usar a modulação. Como no código antigo a máscara era mod > 5.0, 
+        # mas lá mod era dividido por 4.0 em vez de 8.0, vamos usar mod > 1.0
+        mask = mod > 1.0
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        mask_eroded = cv2.erode(mask.astype(np.uint8), kernel) > 0
+        
+        abs_phi_masked = np.where(mask_eroded, abs_phi, np.nan)
+        
+        # Save NPY
+        np.save(os.path.join(out_dir, f"abs_phi_{side}.npy"), abs_phi_masked)
+        
+        # Plot
+        plt.figure(figsize=(15, 12))
+        
+        # 1D Phase vs QSI Remap
+        row = abs_phi.shape[0] // 2
+        
+        ax1 = plt.subplot(3, 1, 1)
+        ax1.plot(abs_phi_masked[row, :], color='red', label='Abs Phi')
+        ax1.set_ylabel('Abs Phi Image (rad)', color='red')
+        ax1.set_title(f'Abs Phi Image {side} 1D (Row {row})')
+        ax1.grid(True)
+        
+        ax2 = ax1.twinx()
+        ax2.plot(qsi[row, :], color='blue', alpha=0.5, label='Remapped QSI')
+        ax2.set_ylabel('Remapped QSI Image', color='blue')
+        
+        # 2D Abs Phi
+        plt.subplot(3, 2, 3)
+        plt.imshow(abs_phi_masked, cmap='gray')
+        plt.colorbar()
+        plt.title(f'Abs Phi Image {side} 2D')
+        
+        # 2D Phi Wrapped
+        plt.subplot(3, 2, 4)
+        plt.imshow(np.where(mask_eroded, phi, np.nan), cmap='gray')
+        plt.colorbar()
+        plt.title(f'Wrapped Phi Image {side} 2D')
+        
+        # 2D Modulation Map
+        plt.subplot(3, 2, 5)
+        plt.imshow(mod, cmap='jet')
+        plt.colorbar()
+        plt.title(f'Modulation Map {side}')
+        
+        # 2D QSI Map
+        plt.subplot(3, 2, 6)
+        plt.imshow(np.where(mask_eroded, qsi, np.nan), cmap='viridis')
+        plt.colorbar()
+        plt.title(f'Remapped QSI Image {side} 2D')
+        
+        plt.tight_layout()
+        plt_path = os.path.join(out_dir, f"analysis_{side}.png")
+        plt.savefig(plt_path, dpi=150)
+        plt.close()
+        print(f"Salvo: {plt_path}")
 
-    print(f"Processando Fase a partir de: {dir_phase} ...")
-    imgs_phase = load_images_from_directory(dir_phase, prefix="cam0_phase_step")
-    
-    print(f"Processando Gray Code a partir de: {dir_gray} ...")
-    imgs_gray = load_images_from_directory(dir_gray, prefix="cam0_gray_bit")
-    
-    if len(imgs_phase) > 0 and len(imgs_gray) > 0:
-        wrapped, mod, bg_phase = pmd.decode_nstep_phase(imgs_phase)
-        np.save("out/wrapped_phase.npy", wrapped)
-        cv2.imwrite("out/wrapped_phase.png", cv2.normalize(wrapped, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
-        print("-> Fase salva em 'out/wrapped_phase.npy'")
-        
-        # Carregar imagem branca (se existir) para definir o limiar de binarização do Gray Code
-        white_path = os.path.join(dir_gray, "cam0_gray_white.png")
-        if os.path.exists(white_path):
-            img_white = cv2.imread(white_path, cv2.IMREAD_GRAYSCALE)
-            threshold_bg = img_white.astype(np.float32) * 0.5
-            print("-> Usando 'cam0_gray_white.png' para o cálculo do limiar (threshold = 0.5 * white).")
-        else:
-            threshold_bg = bg_phase
-            print("-> Imagem branca não encontrada, usando a média das franjas senoidais como limiar.")
-        
-        # Desembrulho Temporal (Gray Code)
-        print("-> Decodificando sequencia Gray Code...")
-        k = pmd.decode_graycode(imgs_gray, background=threshold_bg)
-        np.save("out/fringe_order_k.npy", k)
-        cv2.imwrite("out/fringe_order_k.png", cv2.normalize(k, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U))
-        
-        print("-> Realizando desembrulho temporal...")
-        unwrapped = pmd.graycode_unwrapping(wrapped, k)
-        
-        # Aplicar mascara de qualidade e ruído (SNR baixo)
-        valid_mod = mod[mod > 1e-3]
-        if len(valid_mod) > 0:
-            mod_threshold = np.percentile(valid_mod, 95) * 0.1
-        else:
-            mod_threshold = 1.0
-        mask = mod > mod_threshold
-        unwrapped = np.where(mask, unwrapped, np.nan)
-        
-        np.save("out/unwrapped_phase.npy", unwrapped)
-        print("-> Fase Absoluta Desembrulhada salva em 'out/unwrapped_phase.npy'")
-        
-        evaluate_quality(wrapped, mod, 'X', unwrapped)
-        print("-> Análise de qualidade salva em 'out/quality_analysis_X.png'")
-    else:
-        print(f"-> Imagens não encontradas. Verifique os diretórios e prefixos.")
-        
-    print("\nProcessamento concluído.")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
