@@ -5,14 +5,12 @@ import matplotlib.pyplot as plt
 
 def get_gc_order_v(width, px_f, n_bits):
     """
-    Gera a ordem real do Gray Code reproduzindo a mesma técnica do VORIS.
-    No VORIS, isso é feito desenhando a imagem de Gray Code ideal e extraindo 
-    seus valores únicos.
+    Gera a ordem real do Gray Code.
     """
     width_list = [element for element in np.arange(2 ** n_bits, dtype=np.uint8) for _ in range(int(px_f / 2))]
     graycode_list = [n ^ (n >> 1) for n in width_list]
     
-    # Get unique values while preserving order
+    # Obter valores únicos preservando a ordem
     _, indices = np.unique(graycode_list, return_index=True)
     sorted_indices = np.argsort(indices)
     sorted_qsi_val = np.array(graycode_list)[indices][sorted_indices]
@@ -38,7 +36,7 @@ def remap_qsi_image(qsi_image, real_qsi_order):
 
 def process_camera(cam_dir, side):
     print(f"--- Processando Câmera {side} ---")
-    # Read L000 to L015
+    # Ler L000 a L015
     imgs = []
     prefix = 'L' if side == 'left' else 'R'
     for i in range(16):
@@ -48,8 +46,8 @@ def process_camera(cam_dir, side):
             return None
         imgs.append(cv2.imread(path, cv2.IMREAD_GRAYSCALE).astype(np.float32))
         
-    gc_imgs = np.stack(imgs[:8], axis=-1)   # 8 canais (L000 a L007)
-    ph_imgs = np.stack(imgs[8:], axis=-1)   # 8 canais (L008 a L015)
+    gc_imgs = np.stack(imgs[:8], axis=-1)   # 8 canais (R/L000 a R/L007)
+    ph_imgs = np.stack(imgs[8:], axis=-1)   # 8 canais (R/L008 a R/L015)
     
     # 1. Calcular Phi e Modulação
     num_channels = ph_imgs.shape[-1]
@@ -65,7 +63,7 @@ def process_camera(cam_dir, side):
     phi_image = np.arctan2(-sin_contributions, cos_contributions)
     modulation_map = np.sqrt(sin_contributions**2 + cos_contributions**2) / num_channels
     
-    # 2. Calcular QSI bruto (Raw Binary from Gray Code)
+    # 2. Calcular QSI bruto (Raw Binary do Gray Code)
     white_value = gc_imgs[:, :, 0]
     white_value = np.clip(white_value, 1e-6, None)
     
@@ -80,7 +78,7 @@ def process_camera(cam_dir, side):
     real_qsi_order = get_gc_order_v(width=2448, px_f=64, n_bits=6)
     remaped_qsi_image = remap_qsi_image(qsi_image, real_qsi_order)
     
-    # 4. Desembrulho de Fase (Tiago Loureiro, idêntico ao VORIS)
+    # 4. Desembrulho de Fase (Idêntico ao VORIS)
     remap_float = remaped_qsi_image.astype(np.float32)
     abs_phi_image = np.zeros_like(phi_image)
     
